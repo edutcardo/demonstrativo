@@ -18,7 +18,7 @@ def extrair_dados_demonstrativo(arquivo_pdf):
         with pdfplumber.open(arquivo_pdf) as pdf:
             # Itera sobre cada página do documento
             for i, pagina in enumerate(pdf.pages):
-                texto_pagina = pagina.extract_text(x_tolerance=2)
+                texto_pagina = pagina.extract_text(x_tolerance=2, layout=True)
                 if not texto_pagina:
                     continue
 
@@ -32,13 +32,21 @@ def extrair_dados_demonstrativo(arquivo_pdf):
                 uc_match = re.search(r"UC\s*:\s*(\d+)", texto_pagina)
                 if uc_match: dados_pagina["UC"] = uc_match.group(1)
 
-                # Extrai Nome (Regex aprimorado para não capturar linhas extras)
-                nome_match = re.search(r"Nome\s*:\s*(.*?)(?:\n\s*Endereço|\n\s*Bairro)", texto_pagina)
+                # --- LÓGICA CORRIGIDA PARA EXTRAIR O NOME ---
+                # Tenta encontrar o nome parando em delimitadores conhecidos como "Endereço" ou "Bairro"
+                nome_match = re.search(r"Nome\s*:\s*(.*?)(?:\n\s*Endereço|\n\s*Bairro|\n\s*1\.\s*Demonstrativos)", texto_pagina, re.DOTALL)
                 if nome_match:
-                    dados_pagina["Nome"] = nome_match.group(1).replace('\n', ' ').strip()
-                else: # Tenta um método mais simples caso o primeiro falhe
+                    nome_bruto = nome_match.group(1)
+                else: # Fallback para pegar a linha toda caso os delimitadores não sejam encontrados
                     nome_match = re.search(r"Nome\s*:\s*(.*?)\n", texto_pagina)
-                    if nome_match: dados_pagina["Nome"] = nome_match.group(1).strip()
+                    nome_bruto = nome_match.group(1) if nome_match else ""
+                
+                # Limpeza final: remove qualquer texto de "Custo de Disp." que tenha sido capturado junto
+                custo_texto_match = re.search(r"Valor do Custo de Disp", nome_bruto)
+                if custo_texto_match:
+                    nome_bruto = nome_bruto[:custo_texto_match.start()]
+                
+                dados_pagina["Nome"] = nome_bruto.replace('\n', ' ').strip()
                 
                 # Extrai Cidade
                 cidade_match = re.search(r"Cidade\s*:\s*(.*?)\s*-", texto_pagina)
@@ -50,8 +58,8 @@ def extrair_dados_demonstrativo(arquivo_pdf):
                 elif "Demonstrativos de Créditos Utilizados - UC Beneficiária" in texto_pagina:
                     dados_pagina["Tipo"] = "Beneficiária"
 
-                # Extrai Custo de Disponibilidade
-                custo_match = re.search(r"Valor do Custo de Disp\. Kwh\s*[\n,]\s*\"?(\d+)", texto_pagina)
+                # --- LÓGICA CORRIGIDA PARA EXTRAIR O CUSTO DE DISPONIBILIDADE ---
+                custo_match = re.search(r"Valor do Custo de Disp\.\s*Kwh\s*[:\n,]*\s*\"?(\d+)", texto_pagina)
                 if custo_match: dados_pagina["Custo de Disp. (kWh)"] = custo_match.group(1)
 
                 # --- 2. Extrai a tabela de dados mensais da página ---
@@ -114,18 +122,39 @@ def extrair_dados_demonstrativo(arquivo_pdf):
             'Saldo Transferido (kWh)', 'Saldo Final (kWh)'
         ]
         
-        return df[ordem_colunas]
+        # Garante que todas as colunas existam antes de tentar reordenar
+        df = df.reindex(columns=ordem_colunas)
+        return df
 
     except Exception as e:
         st.error(f"Ocorreu um erro crítico ao processar o PDF: {e}")
         return None
 
 # --- INTERFACE DA APLICAÇÃO WEB (STREAMLIT) ---
-# (Nenhuma alteração necessária aqui, a interface continua a mesma)
 
 st.set_page_config(page_title="Leitor de Demonstrativos", layout="centered")
 st.title("Leitor e Conversor de Demonstrativos de Energia")
 st.write("Faça o upload de um arquivo PDF para extrair os dados e gerar uma planilha Excel.")
+
+# Adicionando estilo para o botão verde
+st.markdown("""
+<style>
+    /* Seleciona o container do botão */
+    div.stButton > button:first-child {
+        background-color: #28a745; /* Cor de fundo verde (sucesso) */
+        color: white;             /* Cor do texto branca */
+        border: none;             /* Sem borda */
+        border-radius: 5px;       /* Bordas arredondadas */
+        padding: 10px 24px;       /* Espaçamento interno */
+        font-size: 16px;          /* Tamanho da fonte */
+    }
+    /* Efeito ao passar o mouse por cima */
+    div.stButton > button:first-child:hover {
+        background-color: #218838; /* Verde um pouco mais escuro */
+        color: white;
+    }
+</style>""", unsafe_allow_html=True)
+
 
 arquivo_pdf_anexado = st.file_uploader(
     "Anexe o arquivo PDF aqui",
@@ -136,7 +165,8 @@ arquivo_pdf_anexado = st.file_uploader(
 if arquivo_pdf_anexado is not None:
     st.info(f"Arquivo anexado: **{arquivo_pdf_anexado.name}**")
     
-    if st.button("Ler Demonstrativo e Gerar Planilha", type="primary"):
+    # Removido o 'type="primary"' para usar o estilo customizado
+    if st.button("Ler Demonstrativo e Gerar Planilha"):
         with st.spinner("Processando o PDF... Por favor, aguarde."):
             df_resultado = extrair_dados_demonstrativo(arquivo_pdf_anexado)
 
