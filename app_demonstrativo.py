@@ -5,120 +5,157 @@ import re
 import os
 from io import BytesIO
 
-# --- LÓGICA DE EXTRAÇÃO DO PDF (a mesma função de antes) ---
+# --- LÓGICA DE EXTRAÇÃO DO PDF (VERSÃO APRIMORADA) ---
 def extrair_dados_demonstrativo(arquivo_pdf):
-    unidades_consumidoras = []
+    """
+    Função aprimorada para ler um PDF de demonstrativo, extrair dados de todos os meses de cada página
+    e organizar em um DataFrame detalhado.
+    """
+    todos_os_registros = []
 
     try:
+        # Abre o arquivo PDF com o pdfplumber
         with pdfplumber.open(arquivo_pdf) as pdf:
+            # Itera sobre cada página do documento
             for i, pagina in enumerate(pdf.pages):
-                texto_pagina = pagina.extract_text()
+                texto_pagina = pagina.extract_text(x_tolerance=2)
                 if not texto_pagina:
                     continue
 
-                dados_uc = {
+                # --- 1. Extrai os dados estáticos que se aplicam a toda a página ---
+                dados_pagina = {
                     "UC": "Não encontrado", "Nome": "Não encontrado", "Cidade": "Não encontrado",
-                    "Tipo": "Não encontrado", "Ref. Mês": "03/2025", "Crédito Recebido (kWh)": "N/A",
-                    "Energia Injetada (kWh)": "N/A", "Crédito Utilizado (kWh)": "N/A",
-                    "Saldo Final (kWh)": "N/A", "Página": i + 1
+                    "Tipo": "Não Identificado", "Custo de Disp. (kWh)": "N/A", "Página": i + 1
                 }
 
+                # Extrai UC (Unidade Consumidora)
                 uc_match = re.search(r"UC\s*:\s*(\d+)", texto_pagina)
-                if uc_match: dados_uc["UC"] = uc_match.group(1)
+                if uc_match: dados_pagina["UC"] = uc_match.group(1)
 
-                nome_match = re.search(r"Nome\s*:\s*(.*?)\n", texto_pagina)
-                if nome_match: dados_uc["Nome"] = nome_match.group(1).strip()
-
+                # Extrai Nome (Regex aprimorado para não capturar linhas extras)
+                nome_match = re.search(r"Nome\s*:\s*(.*?)(?:\n\s*Endereço|\n\s*Bairro)", texto_pagina)
+                if nome_match:
+                    dados_pagina["Nome"] = nome_match.group(1).replace('\n', ' ').strip()
+                else: # Tenta um método mais simples caso o primeiro falhe
+                    nome_match = re.search(r"Nome\s*:\s*(.*?)\n", texto_pagina)
+                    if nome_match: dados_pagina["Nome"] = nome_match.group(1).strip()
+                
+                # Extrai Cidade
                 cidade_match = re.search(r"Cidade\s*:\s*(.*?)\s*-", texto_pagina)
-                if cidade_match: dados_uc["Cidade"] = cidade_match.group(1).strip()
+                if cidade_match: dados_pagina["Cidade"] = cidade_match.group(1).strip()
 
-                if "UC Geradora" in texto_pagina: dados_uc["Tipo"] = "Geradora"
-                elif "UC Beneficiária" in texto_pagina: dados_uc["Tipo"] = "Beneficiária"
+                # Extrai Tipo (Lógica corrigida e mais específica)
+                if "Demonstrativos de Créditos Utilizados - UC Geradora" in texto_pagina:
+                    dados_pagina["Tipo"] = "Geradora"
+                elif "Demonstrativos de Créditos Utilizados - UC Beneficiária" in texto_pagina:
+                    dados_pagina["Tipo"] = "Beneficiária"
 
-                tabelas = pagina.extract_tables()
-                tabela_dados = None
-                for tabela in tabelas:
-                    if tabela and tabela[0] and tabela[0][0] and 'Referência' in tabela[0][0]:
-                        tabela_dados = tabela
-                        break
-                
-                if not tabela_dados:
-                    unidades_consumidoras.append(dados_uc)
+                # Extrai Custo de Disponibilidade
+                custo_match = re.search(r"Valor do Custo de Disp\. Kwh\s*[\n,]\s*\"?(\d+)", texto_pagina)
+                if custo_match: dados_pagina["Custo de Disp. (kWh)"] = custo_match.group(1)
+
+                # --- 2. Extrai a tabela de dados mensais da página ---
+                tabela_dados = pagina.extract_table()
+                if not tabela_dados or len(tabela_dados) < 2:
                     continue
 
-                cabecalho = tabela_dados[1]
-                linha_dados = None
+                # --- 3. Itera sobre as linhas da tabela para extrair os dados de CADA MÊS ---
                 for linha in tabela_dados:
-                    if linha and linha[0] is not None and '03/2025' in linha[0]:
-                        linha_dados = linha
-                        break
-                
-                if not linha_dados:
-                    unidades_consumidoras.append(dados_uc)
-                    continue
-                
-                if 'TP' in cabecalho:
-                    try:
-                        idx_cred_recebido, idx_energia_injetada, idx_cred_utilizado, idx_saldo_final = 2, 3, 5, 8
+                    if not linha or not linha[0]: continue
+                    
+                    ref_mes = str(linha[0]).strip()
+                    # Verifica se a primeira célula da linha corresponde a um formato de data (ex: "03/2025")
+                    if re.match(r"^\d{2}/\d{4}$", ref_mes):
                         
-                        dados_uc["Crédito Recebido (kWh)"] = linha_dados[idx_cred_recebido].replace('.', '') if linha_dados[idx_cred_recebido] else "0"
-                        dados_uc["Energia Injetada (kWh)"] = linha_dados[idx_energia_injetada].replace('.', '') if linha_dados[idx_energia_injetada] else "0"
-                        dados_uc["Crédito Utilizado (kWh)"] = linha_dados[idx_cred_utilizado].replace('.', '') if linha_dados[idx_cred_utilizado] else "0"
-                        dados_uc["Saldo Final (kWh)"] = linha_dados[idx_saldo_final].replace('.', '') if linha_dados[idx_saldo_final] else "0"
-                    except (ValueError, IndexError):
-                        pass
+                        # Cria uma cópia dos dados da página para este registro mensal
+                        dados_mes = dados_pagina.copy()
+                        dados_mes['Referência'] = ref_mes
+                        
+                        def clean_cell(cell_value):
+                            if cell_value is None: return "0"
+                            return str(cell_value).replace('.', '').replace('\n', ' ').strip() or "0"
 
-                unidades_consumidoras.append(dados_uc)
+                        try:
+                            # Identifica o tipo de tabela (simples ou complexa) pelo número de colunas
+                            if len(linha) > 15: # Tabela complexa (com colunas PT, FP, TP)
+                                dados_mes['Saldo Anterior (kWh)'] = clean_cell(linha[3])
+                                dados_mes['Créd. Receb. Outra UC (kWh)'] = clean_cell(linha[6])
+                                dados_mes['Energia Injetada (kWh)'] = clean_cell(linha[9])
+                                dados_mes['Energia Ativa (kWh)'] = clean_cell(linha[12])
+                                dados_mes['Crédito Utilizado (kWh)'] = clean_cell(linha[15])
+                                dados_mes['Saldo Mês (kWh)'] = clean_cell(linha[18])
+                                dados_mes['Saldo Transferido (kWh)'] = clean_cell(linha[21])
+                                dados_mes['Saldo Final (kWh)'] = clean_cell(linha[24])
+                            else: # Tabela simples (formato mais comum)
+                                dados_mes['Saldo Anterior (kWh)'] = clean_cell(linha[1])
+                                dados_mes['Créd. Receb. Outra UC (kWh)'] = clean_cell(linha[2])
+                                dados_mes['Energia Injetada (kWh)'] = clean_cell(linha[3])
+                                dados_mes['Energia Ativa (kWh)'] = clean_cell(linha[4])
+                                dados_mes['Crédito Utilizado (kWh)'] = clean_cell(linha[5])
+                                dados_mes['Saldo Mês (kWh)'] = clean_cell(linha[6])
+                                dados_mes['Saldo Transferido (kWh)'] = clean_cell(linha[7])
+                                dados_mes['Saldo Final (kWh)'] = clean_cell(linha[8])
+                            
+                            todos_os_registros.append(dados_mes)
+                        except (IndexError, TypeError):
+                            # Ignora linhas que não puderam ser processadas (ex: cabeçalhos)
+                            continue
+
+        if not todos_os_registros:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(todos_os_registros)
         
-        return pd.DataFrame(unidades_consumidoras)
+        # Reordena as colunas para uma apresentação mais lógica
+        ordem_colunas = [
+            'Página', 'UC', 'Nome', 'Cidade', 'Tipo', 'Custo de Disp. (kWh)', 'Referência',
+            'Saldo Anterior (kWh)', 'Créd. Receb. Outra UC (kWh)', 'Energia Injetada (kWh)',
+            'Energia Ativa (kWh)', 'Crédito Utilizado (kWh)', 'Saldo Mês (kWh)',
+            'Saldo Transferido (kWh)', 'Saldo Final (kWh)'
+        ]
+        
+        return df[ordem_colunas]
 
     except Exception as e:
-        st.error(f"Ocorreu um erro ao processar o PDF: {e}")
+        st.error(f"Ocorreu um erro crítico ao processar o PDF: {e}")
         return None
 
 # --- INTERFACE DA APLICAÇÃO WEB (STREAMLIT) ---
+# (Nenhuma alteração necessária aqui, a interface continua a mesma)
 
-# Título da Aplicação
 st.set_page_config(page_title="Leitor de Demonstrativos", layout="centered")
 st.title("Leitor e Conversor de Demonstrativos de Energia")
 st.write("Faça o upload de um arquivo PDF para extrair os dados e gerar uma planilha Excel.")
 
-# Componente de Upload de Arquivo
 arquivo_pdf_anexado = st.file_uploader(
     "Anexe o arquivo PDF aqui",
     type="pdf",
     help="Apenas arquivos PDF são aceitos"
 )
 
-# Botão para iniciar o processamento
 if arquivo_pdf_anexado is not None:
     st.info(f"Arquivo anexado: **{arquivo_pdf_anexado.name}**")
     
     if st.button("Ler Demonstrativo e Gerar Planilha", type="primary"):
         with st.spinner("Processando o PDF... Por favor, aguarde."):
-            # Chama a função de extração
             df_resultado = extrair_dados_demonstrativo(arquivo_pdf_anexado)
 
             if df_resultado is not None and not df_resultado.empty:
                 st.success("PDF processado com sucesso!")
-                
-                # Mostra uma prévia da tabela na tela
                 st.write("### Pré-visualização dos Dados")
                 st.dataframe(df_resultado)
 
-                # --- Lógica para Download do Excel ---
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     df_resultado.to_excel(writer, index=False, sheet_name='Demonstrativo')
                 
-                # Pega o nome do arquivo original e troca a extensão para .xlsx
-                nome_arquivo_excel = os.path.splitext(arquivo_pdf_anexado.name)[0] + '.xlsx'
+                nome_arquivo_excel = os.path.splitext(arquivo_pdf_anexado.name)[0] + '_completo.xlsx'
 
                 st.download_button(
-                    label="📥 Baixar Planilha Excel",
+                    label="📥 Baixar Planilha Excel Completa",
                     data=output.getvalue(),
                     file_name=nome_arquivo_excel,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("Não foi possível extrair dados do PDF. Verifique o arquivo.")
+                st.error("Não foi possível extrair dados do PDF. Verifique se o formato do arquivo é o esperado.")
