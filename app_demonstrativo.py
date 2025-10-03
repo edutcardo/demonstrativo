@@ -5,21 +5,19 @@ import re
 import os
 from io import BytesIO
 
-# --- LÓGICA DE EXTRAÇÃO DO PDF (VERSÃO APRIMORADA COM CONTROLE DE PÁGINA) ---
+# --- LÓGICA DE EXTRAÇÃO DO PDF (VERSÃO FINAL OTIMIZADA) ---
 def extrair_dados_demonstrativo(arquivo_pdf):
     """
-    Função aprimorada para ler um PDF de demonstrativo, extrair dados de todos os meses de cada página
-    e organizar em um DataFrame detalhado, com controle de páginas não processadas.
+    Função otimizada para ler um PDF, extrair dados com mais flexibilidade na identificação
+    das linhas da tabela e controlar páginas não processadas.
     """
     todos_os_registros = []
-    paginas_nao_processadas = [] # Lista para rastrear páginas que falharam
+    paginas_nao_processadas = []
 
     try:
-        # Abre o arquivo PDF com o pdfplumber
         with pdfplumber.open(arquivo_pdf) as pdf:
-            # Itera sobre cada página do documento
             for i, pagina in enumerate(pdf.pages):
-                num_pagina = i + 1 # Número real da página (começando em 1)
+                num_pagina = i + 1
                 try:
                     texto_pagina = pagina.extract_text(x_tolerance=2, layout=True)
                     if not texto_pagina:
@@ -27,58 +25,60 @@ def extrair_dados_demonstrativo(arquivo_pdf):
                         paginas_nao_processadas.append(num_pagina)
                         continue
 
-                    # --- 1. Extrai os dados estáticos que se aplicam a toda a página ---
+                    # --- 1. Extração de dados estáticos ---
                     dados_pagina = {
                         "UC": "Não encontrado", "Nome": "Não encontrado", "Cidade": "Não encontrado",
                         "Tipo": "Não Identificado", "Custo de Disp. (kWh)": "N/A", "Página": num_pagina
                     }
-
-                    # Extrai UC (Unidade Consumidora)
                     uc_match = re.search(r"UC\s*:\s*(\d+)", texto_pagina)
                     if uc_match: dados_pagina["UC"] = uc_match.group(1)
 
-                    # --- LÓGICA CORRIGIDA PARA EXTRAIR O NOME ---
                     nome_match = re.search(r"Nome\s*:\s*(.*?)(?:\n\s*Endereço|\n\s*Bairro|\n\s*1\.\s*Demonstrativos)", texto_pagina, re.DOTALL)
                     if nome_match:
                         nome_bruto = nome_match.group(1)
                     else:
                         nome_match = re.search(r"Nome\s*:\s*(.*?)\n", texto_pagina)
                         nome_bruto = nome_match.group(1) if nome_match else ""
-
                     custo_texto_match = re.search(r"Valor do Custo de Disp", nome_bruto)
                     if custo_texto_match:
                         nome_bruto = nome_bruto[:custo_texto_match.start()]
-                    
                     dados_pagina["Nome"] = nome_bruto.replace('\n', ' ').strip()
                     
-                    # Extrai Cidade
                     cidade_match = re.search(r"Cidade\s*:\s*(.*?)\s*-", texto_pagina)
                     if cidade_match: dados_pagina["Cidade"] = cidade_match.group(1).strip()
 
-                    # Extrai Tipo
-                    if "Demonstrativos de Créditos Utilizados - UC Geradora" in texto_pagina:
-                        dados_pagina["Tipo"] = "Geradora"
-                    elif "Demonstrativos de Créditos Utilizados - UC Beneficiária" in texto_pagina:
-                        dados_pagina["Tipo"] = "Beneficiária"
-
-                    # --- LÓGICA CORRIGIDA PARA EXTRAIR O CUSTO DE DISPONIBILIDADE ---
+                    if "UC Geradora" in texto_pagina: dados_pagina["Tipo"] = "Geradora"
+                    elif "UC Beneficiária" in texto_pagina: dados_pagina["Tipo"] = "Beneficiária"
+                    
                     custo_match = re.search(r"Valor do Custo de Disp\.\s*Kwh\s*[:\n,]*\s*\"?(\d+)", texto_pagina)
                     if custo_match: dados_pagina["Custo de Disp. (kWh)"] = custo_match.group(1)
 
-                    # --- 2. Extrai a tabela de dados mensais da página ---
+                    # --- 2. Extração da tabela ---
                     tabela_dados = pagina.extract_table()
                     if not tabela_dados or len(tabela_dados) < 2:
-                        st.write(f"-> Página {num_pagina}: Nenhuma tabela de dados encontrada, pulando.")
+                        st.write(f"-> Página {num_pagina}: Nenhuma tabela de dados encontrada.")
                         paginas_nao_processadas.append(num_pagina)
                         continue
 
-                    # --- 3. Itera sobre as linhas da tabela para extrair os dados de CADA MÊS ---
+                    # --- 3. Processamento flexível das linhas da tabela ---
                     linhas_processadas_na_pagina = 0
                     for linha in tabela_dados:
-                        if not linha or not linha[0]: continue
+                        if not linha: continue
                         
-                        ref_mes = str(linha[0]).strip()
-                        if re.match(r"^\d{2}/\d{4}$", ref_mes):
+                        date_offset = -1
+                        ref_mes = None
+
+                        # LÓGICA MELHORADA: Procura pela data nas 3 primeiras células da linha
+                        for idx, cell in enumerate(linha[:3]):
+                            if cell:
+                                match = re.search(r"(\d{2}/\d{4})", str(cell))
+                                if match:
+                                    date_offset = idx
+                                    ref_mes = match.group(1)
+                                    break
+                        
+                        # Se encontrou uma data, processa o restante da linha
+                        if date_offset != -1:
                             dados_mes = dados_pagina.copy()
                             dados_mes['Referência'] = ref_mes
                             
@@ -87,7 +87,8 @@ def extrair_dados_demonstrativo(arquivo_pdf):
                                 return str(cell_value).replace('.', '').replace('\n', ' ').strip() or "0"
 
                             try:
-                                if len(linha) > 15: # Tabela complexa
+                                # Usa a posição da data (offset) para encontrar as outras colunas
+                                if len(linha) > 15: # Tabela complexa (mantém a lógica original de índices)
                                     dados_mes['Saldo Anterior (kWh)'] = clean_cell(linha[3])
                                     dados_mes['Créd. Receb. Outra UC (kWh)'] = clean_cell(linha[6])
                                     dados_mes['Energia Injetada (kWh)'] = clean_cell(linha[9])
@@ -96,15 +97,15 @@ def extrair_dados_demonstrativo(arquivo_pdf):
                                     dados_mes['Saldo Mês (kWh)'] = clean_cell(linha[18])
                                     dados_mes['Saldo Transferido (kWh)'] = clean_cell(linha[21])
                                     dados_mes['Saldo Final (kWh)'] = clean_cell(linha[24])
-                                else: # Tabela simples
-                                    dados_mes['Saldo Anterior (kWh)'] = clean_cell(linha[1])
-                                    dados_mes['Créd. Receb. Outra UC (kWh)'] = clean_cell(linha[2])
-                                    dados_mes['Energia Injetada (kWh)'] = clean_cell(linha[3])
-                                    dados_mes['Energia Ativa (kWh)'] = clean_cell(linha[4])
-                                    dados_mes['Crédito Utilizado (kWh)'] = clean_cell(linha[5])
-                                    dados_mes['Saldo Mês (kWh)'] = clean_cell(linha[6])
-                                    dados_mes['Saldo Transferido (kWh)'] = clean_cell(linha[7])
-                                    dados_mes['Saldo Final (kWh)'] = clean_cell(linha[8])
+                                else: # Tabela simples (ajusta os índices com base no offset)
+                                    dados_mes['Saldo Anterior (kWh)'] = clean_cell(linha[date_offset + 1])
+                                    dados_mes['Créd. Receb. Outra UC (kWh)'] = clean_cell(linha[date_offset + 2])
+                                    dados_mes['Energia Injetada (kWh)'] = clean_cell(linha[date_offset + 3])
+                                    dados_mes['Energia Ativa (kWh)'] = clean_cell(linha[date_offset + 4])
+                                    dados_mes['Crédito Utilizado (kWh)'] = clean_cell(linha[date_offset + 5])
+                                    dados_mes['Saldo Mês (kWh)'] = clean_cell(linha[date_offset + 6])
+                                    dados_mes['Saldo Transferido (kWh)'] = clean_cell(linha[date_offset + 7])
+                                    dados_mes['Saldo Final (kWh)'] = clean_cell(linha[date_offset + 8])
                                 
                                 todos_os_registros.append(dados_mes)
                                 linhas_processadas_na_pagina += 1
@@ -126,14 +127,12 @@ def extrair_dados_demonstrativo(arquivo_pdf):
             return pd.DataFrame(), list(set(paginas_nao_processadas))
 
         df = pd.DataFrame(todos_os_registros)
-        
         ordem_colunas = [
             'Página', 'UC', 'Nome', 'Cidade', 'Tipo', 'Custo de Disp. (kWh)', 'Referência',
             'Saldo Anterior (kWh)', 'Créd. Receb. Outra UC (kWh)', 'Energia Injetada (kWh)',
             'Energia Ativa (kWh)', 'Crédito Utilizado (kWh)', 'Saldo Mês (kWh)',
             'Saldo Transferido (kWh)', 'Saldo Final (kWh)'
         ]
-        
         df = df.reindex(columns=ordem_colunas)
         return df, list(set(paginas_nao_processadas))
 
@@ -150,23 +149,16 @@ st.write("Faça o upload de um arquivo PDF para extrair os dados e gerar uma pla
 st.markdown("""
 <style>
     div.stButton > button:first-child {
-        background-color: #28a745;
-        color: white;
-        border: none;
-        border-radius: 5px;
-        padding: 10px 24px;
-        font-size: 16px;
+        background-color: #28a745; color: white; border: none;
+        border-radius: 5px; padding: 10px 24px; font-size: 16px;
     }
     div.stButton > button:first-child:hover {
-        background-color: #218838;
-        color: white;
+        background-color: #218838; color: white;
     }
 </style>""", unsafe_allow_html=True)
 
 arquivo_pdf_anexado = st.file_uploader(
-    "Anexe o arquivo PDF aqui",
-    type="pdf",
-    help="Apenas arquivos PDF são aceitos"
+    "Anexe o arquivo PDF aqui", type="pdf", help="Apenas arquivos PDF são aceitos"
 )
 
 if arquivo_pdf_anexado is not None:
@@ -178,8 +170,6 @@ if arquivo_pdf_anexado is not None:
 
             if df_resultado is not None and not df_resultado.empty:
                 st.success("PDF processado com sucesso!")
-
-                # CONTROLE DE PÁGINAS: informa ao usuário se alguma página foi pulada
                 if paginas_com_problema:
                     paginas_str = ", ".join(map(str, sorted(paginas_com_problema)))
                     st.warning(f"**Atenção:** Não foi possível extrair tabelas das seguintes páginas: **{paginas_str}**. Verifique se elas contêm dados no formato esperado.")
